@@ -32,6 +32,11 @@ const mockServer = http.createServer((req, res) => {
       // 连接后不回任何字节 → 代理应在上游连接超时后回 504（而不是挂死客户端）
       return;
     }
+    if (parsed.model === 'mock-reset') {
+      // 收到请求后直接断连 → 代理应回 502，且错误消息不泄漏内部异常细节
+      res.socket.destroy();
+      return;
+    }
     if (parsed.model === 'mock-stall') {
       // 出响应头后停滞 → 代理流空闲看门狗应 abort 并结束响应
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -184,6 +189,32 @@ test('invalid json → 400', async () => {
   assert.equal(res.status, 400);
 });
 
+test('合法 JSON 但非对象 → 400 可解析（回归：null 体曾静默挂死、原始类型曾 TypeError 劣化 502）', async () => {
+  // 两个历史缺陷同一根因（入口无形状校验）：
+  // ① body=null 曾直接 return 不回包 → 客户端挂死到自身超时；
+  // ② body=123/"str" 曾在 stripReasoningTriggers 的 in 操作符上抛 TypeError → 误导性 502 计入 errors 看板
+  for (const body of ['null', '123', '"str"', '[1,2]']) {
+    const res = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+      body,
+    });
+    assert.equal(res.status, 400, `body=${body} must be 400`);
+    const j = await res.json(); // 可解析 = 响应确实写出了（挂死回归即在此断言失败）
+    assert.equal(j.error.type, 'invalid_request_error');
+  }
+  // /v1/messages 同样兜住，且包 Anthropic envelope
+  const m = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/messages`, {
+    method: 'POST',
+    headers: { 'x-api-key': KEY, 'Content-Type': 'application/json' },
+    body: 'null',
+  });
+  assert.equal(m.status, 400);
+  const mj = await m.json();
+  assert.equal(mj.type, 'error');
+  assert.equal(mj.error.type, 'invalid_request_error');
+});
+
 test('body over 4MiB → 413', async () => {
   const big = JSON.stringify({ messages: [{ role: 'user', content: 'a'.repeat(5 * 1024 * 1024) }] });
   const res = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/chat/completions`, {
@@ -208,6 +239,14 @@ test('upstream 500 → transparent pass-through', async () => {
   assert.equal(r.status, 500);
   const j = await r.json();
   assert.equal(j.error.message, 'mock upstream boom');
+});
+
+test('upstream 断连 → 502 且消息不外泄内部异常细节', async () => {
+  // mock-reset 直接触发 fetch 异常（非超时路径）：错误详情只进日志，客户端消息固定
+  const r = await chat({ model: 'mock-reset', messages: [] });
+  assert.equal(r.status, 502);
+  const j = await r.json();
+  assert.equal(j.error.message, 'upstream connect failed');
 });
 
 test('client abort cancels upstream (stop burning tokens)', async () => {
@@ -329,4 +368,10 @@ test('reasoning_effort 出站剥除（真机教训：触发上游 thinking 变�
   await chat({ model: 'mock-model', messages: [], stream: false, enable_thinking: true, thinking: { type: 'enabled' } });
   assert.equal(upstreamState.lastBody.enable_thinking, undefined);
   assert.equal(upstreamState.lastBody.thinking, undefined);
+
+  // 流式路径同一剥除（真实 CPA 渠道链走的是流式）：共享同一 fetch 出站点，
+  // 断言钉住流式分支防未来重构把剥除挪进分支
+  await chat({ model: 'mock-model', messages: [], stream: true, reasoning_effort: 'high' });
+  assert.equal(upstreamState.lastBody.reasoning_effort, undefined, 'streaming path must strip too');
+  assert.equal(upstreamState.lastBody.stream, true);
 });

@@ -63,10 +63,19 @@ async function readJsonBody(req, res, reqId, { envelope = false } = {}) {
     else throw e;
     return null;
   }
-  try { return JSON.parse(raw); } catch {
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch {
     send(res, 400, envelope ? anthropicError(400, { error: { message: 'request body is not valid JSON' } }) : { error: { message: 'request body is not valid JSON', type: 'invalid_request_error' } });
     return null;
   }
+  // 合法 JSON ≠ 合法请求体：null/数字/字符串/数组都是合法 JSON，但流入下游会
+  // 退化（null 体会静默挂起不回包、原始类型触发内部 TypeError 变误导性 502），
+  // 在唯一解析点统一 400，三条路由（chat/messages/count_tokens）一并兜住
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    send(res, 400, envelope ? anthropicError(400, { error: { message: 'request body must be a JSON object' } }) : { error: { message: 'request body must be a JSON object', type: 'invalid_request_error' } });
+    return null;
+  }
+  return parsed;
 }
 
 async function handleChatCompletions(req, res, reqId) {
