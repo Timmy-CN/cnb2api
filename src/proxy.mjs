@@ -5,6 +5,20 @@ import { aggregate } from './sse.mjs';
 import { record as recordUsage } from './usage.mjs';
 import { observe as observeModel } from './models.mjs';
 
+// 出站请求剥除思考开关：带 reasoning_effort 等思考参数时上游路由到 thinking 变体，
+// 而该变体把推理阶段也计入 max_tokens——推理吃满预算后 finish_reason=length、
+// content 全空（答案永不生成，真机实测 2048/8192 token 必现）。上游无正确开关可配，
+// 出站统一剥除、锁定非 thinking 变体（与 /v1/messages 请求侧丢弃 thinking 块同一策略）。
+// 表驱动：上游若引入新的思考开关命名，往这张表加一项即可。
+const REASONING_TRIGGERS = ['reasoning_effort', 'reasoning', 'enable_thinking', 'thinking'];
+
+function stripReasoningTriggers(payload) {
+  if (!REASONING_TRIGGERS.some((k) => k in payload)) return payload;
+  const out = { ...payload };
+  for (const k of REASONING_TRIGGERS) delete out[k];
+  return out;
+}
+
 export async function forward({ reqId, payload, wantStream, res, transform }) {
   // transform（可选）：Anthropic /v1/messages 适配挂载点。
   //   payload   已是 OpenAI 格式（server.mjs 侧完成 Messages→OpenAI 转换）
@@ -22,7 +36,7 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
     up = await fetch(config.upstreamUrl, {
       method: 'POST',
       headers: { Authorization: `Bearer ${config.upstreamToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, stream: true }),
+      body: JSON.stringify({ ...stripReasoningTriggers(payload), stream: true }),
       signal: ac.signal,
     });
   } catch (e) {

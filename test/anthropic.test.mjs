@@ -193,6 +193,30 @@ test('宽容校验：真机客户端的规范外载荷不 400（system role 教�
   assert.equal(badImage.messages[0].content, '[image: unsupported source]go');
 });
 
+test('请求转换：thinking 请求参数不泄漏出站（真机教训：触发上游 thinking 变体 → 推理耗尽 max_tokens，content 永不产出）', () => {
+  // claude code 会带 thinking: {type:"enabled", budget_tokens:...}；上游 OpenAI 端点
+  // 侧 reasoning_effort 等思考开关会切到 thinking 变体，而该变体把推理计入
+  // max_tokens 预算，硬 prompt 下 reasoning 吃满预算 → finish_reason=length、
+  // content=[]（2026-10-04 生产抓帧 {'reasoning_only':1024,'empty':2}）。
+  // 请求侧丢弃是唯一稳妥策略，与 thinking 块丢弃同一哲学。
+  const out = fromAnthropicRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 100,
+    thinking: { type: 'enabled', budget_tokens: 2048 },
+    reasoning_effort: 'medium',
+    reasoning: { effort: 'high' },
+    enable_thinking: true,
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(out.thinking, undefined);
+  assert.equal(out.reasoning_effort, undefined);
+  assert.equal(out.reasoning, undefined);
+  assert.equal(out.enable_thinking, undefined);
+  // 非思考字段不受影响
+  assert.equal(out.max_tokens, 100);
+  assert.equal(out.messages.length, 1);
+});
+
 // ---------------------------------------------------------------------------
 // 非流式响应转换
 // ---------------------------------------------------------------------------
@@ -283,6 +307,52 @@ test('流式：usage 块输出 input_tokens（message_delta.output_tokens 来自
   const s = new AnthropicStream({ requestId: 'r3' });
   collect(s, [{ choices: [{ delta: { content: 'x' } }] }, { usage: { prompt_tokens: 100, completion_tokens: 7 } }]);
   // end() 后 usage 已在 message_delta
+});
+
+test('流式：reasoning_content → thinking 块先于 text 块（上游思考+正文两阶段顺序保真）', () => {
+  // 上游 thinking 变体（若未被剥除命中）的行为：reasoning_content 流先出、
+  // content 后出；转换必须保持这个顺序，且 thinking/text 各自独立成块
+  const s = new AnthropicStream({ requestId: 'r9' });
+  const events = collect(s, [
+    { choices: [{ index: 0, delta: { reasoning_content: '需要回答中文。' } }] },
+    { choices: [{ index: 0, delta: { reasoning_content: '直接回答即可。' } }] },
+    { choices: [{ index: 0, delta: { content: '最终答案。' } }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 4 } },
+  ]);
+  const parse = (e) => JSON.parse(e.split(' ').slice(1).join(' '));
+  const starts = events.filter((e) => e.startsWith('content_block_start')).map(parse);
+  // thinking 块在前、text 块在后（Anthropic 规范：思考块必须先于正文块）
+  assert.equal(starts.length, 2);
+  assert.equal(starts[0].content_block.type, 'thinking');
+  assert.equal(starts[1].content_block.type, 'text');
+  assert.ok(starts[0].index < starts[1].index);
+  // 增量内容拼接正确
+  const thinking = events.filter((e) => e.includes('"thinking_delta"')).map(parse).map((d) => d.delta.thinking).join('');
+  const text = events.filter((e) => e.includes('"text_delta"')).map(parse).map((d) => d.delta.text).join('');
+  assert.equal(thinking, '需要回答中文。直接回答即可。');
+  assert.equal(text, '最终答案。');
+  // 块闭合 + 正常收尾
+  assert.equal(events.filter((e) => e.startsWith('content_block_stop')).length, 2);
+  const md = parse(events.find((e) => e.startsWith('message_delta')));
+  assert.equal(md.delta.stop_reason, 'end_turn');
+});
+
+// 真机退化形态锁定（2026-10-04 生产抓帧）：reasoning 吃满 max_tokens → 全帧
+// reasoning_content、content 全空、finish_reason=length。转换层忠实回传思考流并以
+// max_tokens 收尾（不补伪造正文、不丢块），真正的修复在上游转发层剥除触发参数。
+test('流式：退化形态（纯 reasoning_content 流 + finish_reason=length）→ 纯 thinking 块 + max_tokens 收尾', () => {
+  const s = new AnthropicStream({ requestId: 'r10' });
+  const events = collect(s, [
+    ...Array.from({ length: 5 }, (_, i) => ({ choices: [{ index: 0, delta: { reasoning_content: `词${i} ` } }] })),
+    { choices: [{ index: 0, delta: {}, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 2048 } },
+  ]);
+  const parse = (e) => JSON.parse(e.split(' ').slice(1).join(' '));
+  const starts = events.filter((e) => e.startsWith('content_block_start')).map(parse);
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].content_block.type, 'thinking');
+  assert.equal(events.filter((e) => e.includes('"text_delta"')).length, 0, '退化形态下不得伪造正文块');
+  const md = parse(events.find((e) => e.startsWith('message_delta')));
+  assert.equal(md.delta.stop_reason, 'max_tokens');
 });
 
 test('流式：frame() 产出合法 SSE 帧', () => {
