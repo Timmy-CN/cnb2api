@@ -50,7 +50,8 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
       return { handled: false, status: 504, body: { error: { message: 'upstream connect timeout' } } };
     }
     log.error(reqId, 'upstream fetch failed', { err: String(e).slice(0, 200) });
-    return { handled: false, status: 502, body: { error: { message: `upstream connect failed: ${e.cause || e}` } } };
+    // 错误详情只进日志：内部异常串（含 cause/payload 片段）不外泄给客户端
+    return { handled: false, status: 502, body: { error: { message: 'upstream connect failed' } } };
   }
   clearTimeout(timer);
 
