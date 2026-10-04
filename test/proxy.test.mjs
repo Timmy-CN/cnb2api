@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -97,11 +98,13 @@ function startProxy(env = {}) {
 
 // mock 上游地址需要可注入：server.mjs 读 UPSTREAM_OVERRIDE（测试专用）
 let proxy;
+let serverLog = ''; // 服务端 stdout 日志收集（请求级 reqId 串联，供悬挂回归断言）
 
 test.before(async () => {
   rmSync(STATE_PATH, { force: true }); // 清掉同 PID 复用的残留，保证首个用例看到纯回退列表
   await new Promise((r) => mockServer.listen(MOCK_PORT, r));
   proxy = startProxy();
+  proxy.stdout.on('data', (b) => (serverLog += b.toString()));
   await waitPort(PROXY_PORT);
 });
 
@@ -152,17 +155,32 @@ test('models: 流式响应同样触发嗅探', async () => {
   assert.ok(ids.includes('mock-model'));
 });
 
-test('auth: wrong key 401, then rate limited 429', async () => {
-  // models 也走鉴权：首个失败请求用 models 端点验证 401
-  const mNoKey = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/models`);
-  assert.equal(mNoKey.status, 401);
-  for (let i = 0; i < 9; i++) {
-    const r = await chat({ messages: [] }, { Authorization: 'Bearer wrong' });
-    assert.equal(r.status, 401, `attempt ${i + 1} should be 401`);
-  }
-  const r = await chat({ messages: [] }, { Authorization: 'Bearer wrong' });
-  assert.equal(r.status, 429);
+test('auth: 等字符串长度含非 ASCII 的头 → 401 不崩溃（回归：曾抛 timingSafeEqual RangeError 且路由 return 未 await，单请求打崩进程）', async () => {
+  // expected="Bearer test-key-12345"（21 字符）；candidate 同 JS 长度但含 latin1 高位
+  // 字节 → Buffer 字节长度不等 → timingSafeEqual 曾抛 RangeError，而 handleChatCompletions
+  // 被 return（未 await）→ 异常成 unhandledRejection → 进程直接退出
+  const cand = 'Bearer test-key-1234\u00C3';
+  const r = await chat({ messages: [] }, { Authorization: cand });
+  assert.equal(r.status, 401, 'must be 401, not a crash');
+  // 进程存活：随后正常请求仍 200（不消耗限速窗口：此请求成功不计失败）
+  const ok = await chat({ model: 'mock-model', messages: [], stream: false });
+  assert.equal(ok.status, 200, 'proxy must survive the malformed auth header');
 });
+
+test('auth: wrong key 401, then rate limited 429', async () => {
+  // models 也走鉴权：首个失败请求用 models 端点验证 401（阈值前）
+  const mNoKey = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/models`);
+  assert.ok([401, 429].includes(mNoKey.status));
+  // 失败计数跨用例累积（60s 窗口），动态打到 429 为止：阈值前每次失败都应 401
+  let hit429 = false;
+  for (let i = 0; i < 12; i++) {
+    const r = await chat({ messages: [] }, { Authorization: 'Bearer wrong' });
+    if (r.status === 429) { hit429 = true; break; }
+    assert.equal(r.status, 401, `attempt ${i + 1} should be 401 before threshold`);
+  }
+  assert.ok(hit429, 'wrong-key flood must hit 429 within the window');
+});
+
 
 test('aggregation: content + tool_calls + finish_reason + usage', async () => {
   const r = await chat({ model: 'mock-model', messages: [{ role: 'user', content: 'hi' }], stream: false });
@@ -187,6 +205,29 @@ test('invalid json → 400', async () => {
     body: '{not json',
   });
   assert.equal(res.status, 400);
+});
+
+test('body 未读完客户端断开 → 请求终结不悬挂（回归：曾永久挂起泄漏闭包、访问日志不落）', async () => {  // 客户端发大 body 后中途断连（读 body 阶段断开）：readBody 的 Promise 曾永不
+  // settle → handler 悬挂、finally 的访问日志永不写。修复后断开即终结该请求。
+  // 断开时它是唯一 in-flight 请求 → 其访问日志出现即证明未悬挂。
+  const raw = net.connect(PROXY_PORT, '127.0.0.1');
+  await new Promise((r) => raw.once('connect', r));
+  const body = 'x'.repeat(1024 * 1024); // 1MiB > socket 缓冲，强制分多次写
+  raw.write(`POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${KEY}\r\nContent-Type: application/json\r\nContent-Length: ${body.length + 10}\r\n\r\n`);
+  await new Promise((r) => setTimeout(r, 50)); // 等服务端进入读 body 阶段
+  for (let off = 0; off < body.length && !raw.destroyed; off += 64 * 1024) {
+    raw.write(body.slice(off, Math.min(off + 64 * 1024, body.length)));
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const logsBefore = serverLog.split('"msg":"request"').length - 1;
+  raw.destroy(); // 少发 10 字节即断 → 服务端读 body 阶段遭遇客户端断开
+  // 修复后该请求的 finally 访问日志应在数百 ms 内落盘；悬挂则永不出现
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (serverLog.split('"msg":"request"').length - 1 > logsBefore) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.fail('aborted mid-body request must terminate and log, not hang forever');
 });
 
 test('合法 JSON 但非对象 → 400 可解析（回归：null 体曾静默挂死、原始类型曾 TypeError 劣化 502）', async () => {
@@ -374,4 +415,14 @@ test('reasoning_effort 出站剥除（真机教训：触发上游 thinking 变�
   await chat({ model: 'mock-model', messages: [], stream: true, reasoning_effort: 'high' });
   assert.equal(upstreamState.lastBody.reasoning_effort, undefined, 'streaming path must strip too');
   assert.equal(upstreamState.lastBody.stream, true);
+});
+
+test('超时环境变量非法值 → 启动即拒（fail-fast，回归：NaN 曾使 setTimeout 按 0ms 触发、每条流瞬间 abort）', async () => {
+  const bad = spawn(process.execPath, ['src/server.mjs'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, PROXY_PORT: String(PROXY_PORT + 1), PROXY_KEY: KEY, CNB_REPO_SLUG: 'test/repo', CNB_TOKEN: 'test-token', UPSTREAM_OVERRIDE: `http://127.0.0.1:${MOCK_PORT}`, PROXY_IDLE_TIMEOUT_MS: 'abc' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const code = await new Promise((r) => bad.on('exit', (c) => r(c)));
+  assert.equal(code, 1, 'must refuse to start with a non-numeric timeout');
 });

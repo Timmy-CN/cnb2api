@@ -16,7 +16,13 @@ export function checkAuth(req) {
     ? `Bearer ${req.headers['x-api-key']}` : '';
   const expected = `Bearer ${config.proxyKey}`;
   const candidate = auth || xapiKey;
-  const ok = candidate.length === expected.length && crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(expected));
+  // 恒时比较要求两串字节等长：客户端头可含非 ASCII（latin1 解码后字节序列更长），
+  // 字符串长度相等但字节长度不等时 timingSafeEqual 抛 RangeError——try 包住按
+  // 失败处理（长度不同直接拒绝，不泄露除「长度不等」外的任何时序信息）
+  let ok = false;
+  try {
+    ok = crypto.timingSafeEqual(Buffer.from(candidate, 'utf8'), Buffer.from(expected, 'utf8'));
+  } catch { /* 字节长度不等 → 认证失败 */ }
   if (ok) return { ok: true };
 
   const now = Date.now();

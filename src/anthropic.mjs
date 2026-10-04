@@ -133,7 +133,7 @@ function convertMessage(m) {
   if (m.role === 'assistant') {
     return convertAssistantBlocks(m.content);
   }
-  return convertUserBlocks(m.content);
+  return convertUserBlocks(m.content, m.role);
 }
 
 // assistant：text 块拼 content；tool_use 块拼 tool_calls；thinking 块丢弃（上游不消费）
@@ -157,13 +157,14 @@ function convertAssistantBlocks(blocks) {
   return [msg];
 }
 
-// user：text 拼一条 user 消息；tool_result 逐个拆成 role:"tool"；image 转 data URL
-function convertUserBlocks(blocks) {
+// 非 assistant 消息（user/system）→ 0..n 条 OpenAI 消息（tool_result 拆成独立 tool 消息）
+// role 由调用方传入：字符串 content 的 system 路径与块数组路径保持同一角色，不再降级
+function convertUserBlocks(blocks, role = 'user') {
   const out = [];
   const textParts = [];
   const flushText = () => {
     if (textParts.length) {
-      out.push({ role: 'user', content: neutralize(textParts.join('')) });
+      out.push({ role, content: neutralize(textParts.join('')) });
       textParts.length = 0;
     }
   };
@@ -185,7 +186,7 @@ function convertUserBlocks(blocks) {
     }
   }
   flushText();
-  if (!out.length) out.push({ role: 'user', content: '' });
+  if (!out.length) out.push({ role, content: '' });
   return out;
 }
 
