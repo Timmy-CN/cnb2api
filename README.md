@@ -100,14 +100,14 @@ Three simple steps, only one API key to configure:
 ```bash
 ANTHROPIC_BASE_URL=https://ai.example.com \
 ANTHROPIC_AUTH_TOKEN=your-proxy-key \
-ANTHROPIC_MODEL=deepseek-v4-flash \
+ANTHROPIC_MODEL=deepseek-v4.1-flash \
 claude -p "Hello! Introduce yourself."
 ```
 
 ### 2. OpenAI Clients & Gateways
 Point BaseURL to `https://ai.example.com/v1` and set API Key to `PROXY_KEY`:
 - **Chat Apps**: NextChat, LobeChat, Cherry Studio, Open WebUI
-- **Gateways**: New API, One API (Channel type: OpenAI, model: `deepseek-v4-flash`)
+- **Gateways**: New API, One API (Channel type: OpenAI, model: `deepseek-v4.1-flash`)
 - **Coding Agents**: Cursor, Continue, Codex CLI
 
 ### 3. curl Verification
@@ -115,7 +115,7 @@ Point BaseURL to `https://ai.example.com/v1` and set API Key to `PROXY_KEY`:
 curl https://ai.example.com/v1/chat/completions \
   -H "Authorization: Bearer your-proxy-key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
+  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
 ---
@@ -131,7 +131,7 @@ Real production billing data measured over months of live operation (not marketi
 | **Compute Core-Hours** | **1,600 core-hours** (shared dev + CI pool) | A `runner.cpus: 2` workspace running 24/7 for 30 days costs **1,440 core-hours** (safely within the 1,600 pool). No need to stop the proxy. |
 
 > 💡 **The Math Behind 200M Free Tokens/Month**:
-> 1. **Base Upstream Rate**: Live measurements on `deepseek-v4-flash` show an uncached 9,000-token request costs ~0.39 credit (approx **23,000 tokens / credit**).
+> 1. **Base Upstream Rate**: Live measurements on `deepseek-v4.1-flash` show an uncached 9,000-token request costs ~0.39 credit (approx **23,000 tokens / credit**).
 > 2. **Official Prompt Cache 30x Discount**: Once prompt prefixes hit CNB's prompt cache, cost drops to **~0.01 credit**, slashing cost to **1/30** of base price (~**700,000 tokens / credit**).
 > 3. **Real-World Scenarios**: In coding assistants, Claude Code, and multi-turn Agent conversations with long system prompts and history reuse, cache hit rates typically sit at 80%~95% (assuming a realistic **90% cache hit rate**):
 >    $$\text{Blended Cost} = 10\% \times 1 + 90\% \times \frac{1}{30} \approx 13\% \text{ base cost} \implies \approx 177,000\text{ tokens / credit}$$
@@ -171,7 +171,8 @@ npm run quota                 # or: npx cnb2api-quota
 | `PROXY_KEY` | — (required) | Bearer key / x-api-key sent by clients. Refuses to start if missing. |
 | `CNB_TOKEN` | — (required) | Upstream token injected by CNB pipeline environment. |
 | `CNB_REPO_SLUG` | (built-in) | `org/repo` used for upstream routing. Auto-filled by CNB. |
-| `PROXY_MODELS` | `deepseek-v4-flash,glm-5.3-flash,kimi-k3` | Model IDs advertised on `/v1/models`. |
+| `PROXY_MODELS` | `deepseek-v4.1-flash,glm-5.3-flash,kimi-k3` | **Fallback** model ids for `/v1/models` — used only until a response reveals the real upstream model name. |
+| `PROXY_MODELS_STATE` | `models-state.json` | Where the sniffed-model registry is persisted across workspace restarts. Relative paths resolve against the run dir. |
 | `PROXY_PORT` | `9001` | Listen port. |
 | `PROXY_UPSTREAM_TIMEOUT_MS` | `15000` | Upstream connect / first-byte timeout (ms). |
 | `PROXY_IDLE_TIMEOUT_MS` | `300000` | Per-stream idle watchdog (ms). |
@@ -183,7 +184,7 @@ npm run quota                 # or: npx cnb2api-quota
 ## FAQ
 
 **Q: Why does the model list include glm and kimi when the backend is DeepSeek?**  
-A: The official CNB AI gateway currently routes all models to `deepseek-v4-flash`. Exposing multiple aliases ensures compatibility with various client presets out of the box.
+A: `/v1/models` is **self-discovering**: the CNB gateway has no list endpoint, so the proxy learns the real model name from every completion response (the gateway echoes the resolved id, e.g. `deepseek-v4.1-flash`) and advertises that. `PROXY_MODELS` is only a fallback for the very first requests before anything has been sniffed — it exists so client presets that name glm/kimi keep working out of the box, and you can freeze it to whatever `/v1/models` has been returning.
 
 **Q: Are native Tool Calls / Function Calling supported?**  
 A: Fully supported. In streaming mode, `input_json_delta` chunks are cleanly combined; in non-streaming mode, standard `tool_calls` structures are reassembled.

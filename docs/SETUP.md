@@ -52,10 +52,18 @@ the secrets-repo flow below — delete the inline `env:` line, uncomment
 - A [cnb.cool](https://cnb.cool) account whose org has **AI credits** enabled
   (the "天才程序员" / built-in AI offering). Without it the upstream endpoint
   `https://api.cnb.cool/<org>/<repo>/-/ai/chat/completions` returns errors.
-- Know which models your account exposes. Set `PROXY_MODELS` to that list —
-  the repo default is `deepseek-v4-flash,glm-5.3-flash,kimi-k3` (what our
-  account advertises; the gateway currently routes all three to the same
-  upstream model) and requests naming an unavailable model will be rejected.
+- Know which models your account exposes. `/v1/models` **self-discovers** the
+  real upstream model name: the CNB gateway has no list endpoint, so the proxy
+  sniffs the resolved `model` id echoed on every completion response (currently
+  `deepseek-v4.1-flash`) and advertises that, persisting it across workspace
+  restarts. `PROXY_MODELS` is only the **fallback** used until the first
+  response has been sniffed — the repo default is
+  `deepseek-v4.1-flash,glm-5.3-flash,kimi-k3` (what our account advertises) so
+  client presets keep working before any request has run. As of 2026-10 CNB
+  upgraded the DeepSeek backend from `deepseek-v4-flash` to
+  `deepseek-v4.1-flash`; because the gateway echoes the resolved model id on
+  every response, the proxy picks up future renames automatically — no code or
+  config change needed.
 
 **Quota & compute economics** (measured on our deployment):
 - **Compute**: a workspace pinned at `runner.cpus: 2` burns 48 core-hours/day;
@@ -99,7 +107,7 @@ inlined in the code repo — is the cleaner layout for teams or public forks.
 |---|---|
 | both `imports:` stanzas | `https://cnb.cool/your-org/cnb2api-secrets/-/blob/main/proxy.yml` |
 | vscode `env:` | delete the inline `PROXY_KEY` (it now comes from the secrets repo) |
-| (secrets repo) | `PROXY_MODELS: "model-x,model-y"` if your models differ |
+| (secrets repo) | `PROXY_MODELS: "model-x,model-y"` — fallback list only (optional) |
 
 `REPO` for the keepalive needs no edit either way — it reads the built-in
 `CNB_REPO_SLUG`. Note the keepalive cron lives under the `main:` branch key —

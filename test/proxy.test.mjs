@@ -4,10 +4,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 
 const MOCK_PORT = 19101;
 const PROXY_PORT = 19102;
 const KEY = 'test-key-12345';
+// 嗅探注册表状态文件隔离到临时目录：避免污染仓库，也避免上次运行残留使 models 列表漂移
+const STATE_PATH = join(tmpdir(), `cnb2api-models-test-${process.pid}.json`);
 
 // ---- mock 上游：完整 SSE（usage/tool_calls/finish_reason）+ 可选慢响应 ----
 const upstreamState = { clientAborted: false };
@@ -79,7 +84,7 @@ async function waitPort(port, timeoutMs = 5000) {
 function startProxy(env = {}) {
   return spawn(process.execPath, ['src/server.mjs'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PROXY_PORT: String(PROXY_PORT), PROXY_KEY: KEY, CNB_REPO_SLUG: 'test/repo', CNB_TOKEN: 'test-token', UPSTREAM_OVERRIDE: `http://127.0.0.1:${MOCK_PORT}`, PROXY_UPSTREAM_TIMEOUT_MS: '400', PROXY_IDLE_TIMEOUT_MS: '400', ...env },
+    env: { ...process.env, PROXY_PORT: String(PROXY_PORT), PROXY_KEY: KEY, CNB_REPO_SLUG: 'test/repo', CNB_TOKEN: 'test-token', UPSTREAM_OVERRIDE: `http://127.0.0.1:${MOCK_PORT}`, PROXY_UPSTREAM_TIMEOUT_MS: '400', PROXY_IDLE_TIMEOUT_MS: '400', PROXY_MODELS_STATE: STATE_PATH, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
@@ -88,6 +93,7 @@ function startProxy(env = {}) {
 let proxy;
 
 test.before(async () => {
+  rmSync(STATE_PATH, { force: true }); // 清掉同 PID 复用的残留，保证首个用例看到纯回退列表
   await new Promise((r) => mockServer.listen(MOCK_PORT, r));
   proxy = startProxy();
   await waitPort(PROXY_PORT);
@@ -113,7 +119,31 @@ test('health + models', async () => {
   const m = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/models`, { headers: { Authorization: `Bearer ${KEY}` } });
   const mj = await m.json();
   assert.equal(mj.object, 'list');
-  assert.ok(mj.data.length >= 3);
+  // 尚无嗅探样本时回退 PROXY_MODELS（默认 3 个）
+  assert.ok(mj.data.length >= 3, `expected fallback list, got ${JSON.stringify(mj.data)}`);
+});
+
+test('models: 响应嗅探真实上游模型名后 /v1/models 返回它', async () => {
+  // 打一次非流式请求：mock 上游回显 model=mock-model → 注册表登记
+  const r = await chat({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }], stream: false });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.equal(j.model, 'mock-model');
+
+  const m = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/models`, { headers: { Authorization: `Bearer ${KEY}` } });
+  const mj = await m.json();
+  const ids = mj.data.map((d) => d.id);
+  assert.deepEqual(ids, ['mock-model'], 'once sniffed, only the real upstream model should be advertised');
+});
+
+test('models: 流式响应同样触发嗅探', async () => {
+  // mock 流式回显 model=mock-model（见 mock 上游 chunks）；确保流式路径也接了 observe()
+  const r = await chat({ model: 'deepseek-v4.1-flash', messages: [], stream: true });
+  assert.equal(r.status, 200);
+  await r.text(); // 读完整流
+  const m = await fetch(`http://127.0.0.1:${PROXY_PORT}/v1/models`, { headers: { Authorization: `Bearer ${KEY}` } });
+  const ids = (await m.json()).data.map((d) => d.id);
+  assert.ok(ids.includes('mock-model'));
 });
 
 test('auth: wrong key 401, then rate limited 429', async () => {

@@ -7,9 +7,15 @@ export const config = {
   repo: process.env.CNB_REPO_SLUG || process.env.CNB_BUILD_REPO || '',
   proxyKey: process.env.PROXY_KEY || '',
   upstreamToken: process.env.CNB_TOKEN || '',
-  // Model ids advertised on /v1/models. Actual routing is done by the CNB gateway;
-  // set PROXY_MODELS to whatever your account exposes.
-  models: (process.env.PROXY_MODELS || 'deepseek-v4-flash,glm-5.3-flash,kimi-k3').split(',').map((s) => s.trim()).filter(Boolean),
+  // Model ids advertised on /v1/models when nothing has been sniffed yet.
+  // The gateway has no list endpoint, so once a response reveals the real
+  // upstream model name (e.g. deepseek-v4.1-flash) it wins; this default is the
+  // frozen fallback (see src/models.mjs). Set PROXY_MODELS to whatever your
+  // account exposes.
+  models: (process.env.PROXY_MODELS || 'deepseek-v4.1-flash,glm-5.3-flash,kimi-k3').split(',').map((s) => s.trim()).filter(Boolean),
+  // Where the sniffed-model registry is persisted (survives a workspace hot
+  // restart). Relative paths resolve against the process CWD (the run dir).
+  modelsStatePath: process.env.PROXY_MODELS_STATE || 'models-state.json',
   maxBodyBytes: 4 * 1024 * 1024,
   upstreamTimeoutMs: Number(process.env.PROXY_UPSTREAM_TIMEOUT_MS || 15_000), // connect + first byte
   idleTimeoutMs: Number(process.env.PROXY_IDLE_TIMEOUT_MS || 300_000),        // per-stream idle cap (reset each chunk)
