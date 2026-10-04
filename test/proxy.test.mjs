@@ -15,12 +15,13 @@ const KEY = 'test-key-12345';
 const STATE_PATH = join(tmpdir(), `cnb2api-models-test-${process.pid}.json`);
 
 // ---- mock 上游：完整 SSE（usage/tool_calls/finish_reason）+ 可选慢响应 ----
-const upstreamState = { clientAborted: false };
+const upstreamState = { clientAborted: false, lastBody: null };
 const mockServer = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     const parsed = JSON.parse(body);
+    upstreamState.lastBody = parsed; // 捕获打向上游的出站请求体（剥除类断言用）
 
     if (parsed.model === 'mock-500') {
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -302,4 +303,30 @@ test('sseTail 收尾 flush：末 chunk 无换行结尾仍提取 usage', async ()
   // mock-noeol 上游 usage {7,3}：若收尾 flush 缺失，prompt 不增
   assert.ok(after.prompt >= before.prompt + 7, `prompt must include tail-flushed usage, before=${before.prompt} after=${after.prompt}`);
   assert.ok(after.completion >= before.completion + 3, 'completion must include tail-flushed usage');
+});
+
+test('reasoning_effort 出站剥除（真机教训：触发上游 thinking 变体后推理耗尽 max_tokens，content 永不产出）', async () => {
+  // 上游退化形态实测（2026-10-04 生产抓帧）：带 reasoning_effort 的请求命中
+  // thinking 变体 → 全部输出进 reasoning_content、content=[]、finish_reason=length，
+  // 客户端收到的是"思考块"而非答案。上游网关无正确开关可配，出站统一剥除最稳。
+  const r = await chat({
+    model: 'mock-model',
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: false,
+    reasoning_effort: 'medium',
+  });
+  assert.equal(r.status, 200);
+  await r.json();
+  assert.equal(upstreamState.lastBody.reasoning_effort, undefined, 'reasoning_effort must be stripped from the upstream request');
+  // 客户端侧原始参数不受影响是天然成立（我们只改出站体）；这里同时断言其他字段原样透传
+  assert.equal(upstreamState.lastBody.model, 'mock-model');
+  assert.equal(upstreamState.lastBody.temperature, undefined);
+
+  // reasoning_content 响应参数（OpenAI o1 风格 reasoning: {effort}）同理剥除
+  await chat({ model: 'mock-model', messages: [], stream: false, reasoning: { effort: 'high' } });
+  assert.equal(upstreamState.lastBody.reasoning, undefined, 'reasoning object must be stripped too');
+  // enable_thinking / thinking（部分网关的思考开关命名）同样不外泄
+  await chat({ model: 'mock-model', messages: [], stream: false, enable_thinking: true, thinking: { type: 'enabled' } });
+  assert.equal(upstreamState.lastBody.enable_thinking, undefined);
+  assert.equal(upstreamState.lastBody.thinking, undefined);
 });
