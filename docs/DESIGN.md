@@ -23,6 +23,7 @@ src/
 ├── config.mjs   env loading + fail-fast validation (no default key, ever)
 ├── auth.mjs     Bearer key check (timing-safe) + sliding-window fail limiter
 ├── sse.mjs      SSE event parsing + non-stream aggregation
+├── models.mjs   passive model-name registry (sniffed from responses, disk-persisted)
 ├── proxy.mjs    upstream forwarding: AbortSignal timeout + two-way cancel
 ├── server.mjs   http server + routing (/health, /v1/models, /v1/chat/completions)
 └── log.mjs      structured single-line JSON logs, correlated by reqId
@@ -63,6 +64,19 @@ The non-stream aggregator is a small state machine, not a naive
 - `finish_reason` → last non-null value, default `stop`
 - `id`/`model`/`created` → upstream values win
 - comment/heartbeat lines (`: keep-alive`) → ignored
+
+### Model discovery (no list endpoint upstream)
+
+The CNB gateway exposes **no model-list endpoint** (every candidate path 404s),
+so the only trustworthy source of the real model name is the `model` field the
+gateway echoes on every completion. `models.mjs` therefore **sniffs passively**:
+`proxy.mjs` calls `observe(j.model)` on streamed chunks and on the non-stream
+aggregate, and the registry keeps first-seen order, dedups, and atomically
+persists to `PROXY_MODELS_STATE` (`writeFileSync` to `.tmp` + `renameSync`) so a
+workspace hot-restart keeps history. `/v1/models` returns the sniffed names, and
+only falls back to the frozen `PROXY_MODELS` list while nothing has been sniffed
+yet. There is deliberately **no startup probe** — we never spend credits on a
+liveness request. Cost: zero.
 
 ## 4. Self-healing address (keepalive)
 

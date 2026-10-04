@@ -199,7 +199,7 @@ test('宽容校验：真机客户端的规范外载荷不 400（system role 教�
 
 test('响应转换：content/tool_use/stop_reason/usage 字段映射', () => {
   const openai = {
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-v4.1-flash',
     choices: [{
       index: 0,
       message: {

@@ -3,6 +3,7 @@ import { config } from './config.mjs';
 import { log } from './log.mjs';
 import { aggregate } from './sse.mjs';
 import { record as recordUsage } from './usage.mjs';
+import { observe as observeModel } from './models.mjs';
 
 export async function forward({ reqId, payload, wantStream, res, transform }) {
   // transform（可选）：Anthropic /v1/messages 适配挂载点。
@@ -77,6 +78,7 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
       let j;
       try { j = JSON.parse(data); } catch { return; /* 心跳/非 JSON 行忽略 */ }
       if (j.usage) usage = j.usage;
+      if (j.model) observeModel(j.model); // 嗅探上游真实模型名（无 list 接口，只能从响应读）
       if (transform) writeEvents(transform.stream.feed(j));
     };
     const parseLines = (lines) => {
@@ -156,6 +158,7 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
   }
   clearTimeout(idleTimer);
   const body = aggregate(text);
+  if (body.model) observeModel(body.model); // 嗅探上游真实模型名（非流式聚合结果里的 model）
   recordUsage({ prompt: body.usage.prompt_tokens || 0, completion: body.usage.completion_tokens || 0 });
   log.info(reqId, 'chat done', { ms: Date.now() - started, out: body.usage.completion_tokens });
   if (transform) return { handled: false, status: 200, body: transform.response(body) };

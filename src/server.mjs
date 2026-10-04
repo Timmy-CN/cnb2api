@@ -5,6 +5,7 @@ import { checkAuth } from './auth.mjs';
 import { forward } from './proxy.mjs';
 import { log, newReqId } from './log.mjs';
 import { snapshot as usageSnapshot } from './usage.mjs';
+import { list as listModels } from './models.mjs';
 import { fromAnthropicRequest, toAnthropicResponse, AnthropicStream, countTokensEstimate, frame, ProtocolError } from './anthropic.mjs';
 
 function send(res, status, body, extraHeaders = {}) {
@@ -109,7 +110,8 @@ const server = http.createServer(async (req, res) => {
       // 模型列表需要鉴权（key 不对同样计失败）；health 保持免鉴权供探测
       const auth = checkAuth(req);
       if (!auth.ok) return sendAuthFailure(res, auth, reqId, req.url);
-      return send(res, 200, { object: 'list', data: config.models.map((id) => ({ id, object: 'model', owned_by: 'cnb' })) });
+      // 优先返回嗅探到的上游真实模型名；尚无样本时回退 PROXY_MODELS（见 models.mjs）
+      return send(res, 200, { object: 'list', data: listModels().map((id) => ({ id, object: 'model', owned_by: 'cnb' })) });
     }
 
     if (req.method === 'POST' && req.url.split('?')[0].endsWith('/chat/completions')) {

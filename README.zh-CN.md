@@ -100,14 +100,14 @@ https://api.cnb.cool/<org>/<repo>/-/ai/chat/completions (官方 AI 核心端点)
 ```bash
 ANTHROPIC_BASE_URL=https://ai.example.com \
 ANTHROPIC_AUTH_TOKEN=your-proxy-key \
-ANTHROPIC_MODEL=deepseek-v4-flash \
+ANTHROPIC_MODEL=deepseek-v4.1-flash \
 claude -p "你好，请介绍一下你自己"
 ```
 
 ### 2. OpenAI 客户端 / 聚合网关
 将 BaseURL 指向 `https://ai.example.com/v1`，API Key 填入 `PROXY_KEY`：
 - **聊天应用**：NextChat、LobeChat、Cherry Studio、Open WebUI
-- **网关渠道**：New API、One API（渠道类型选择 OpenAI，模型填 `deepseek-v4-flash`）
+- **网关渠道**：New API、One API（渠道类型选择 OpenAI，模型填 `deepseek-v4.1-flash`）
 - **代码插件**：Cursor、Continue、Codex CLI
 
 ### 3. curl 调用验证
@@ -115,7 +115,7 @@ claude -p "你好，请介绍一下你自己"
 curl https://ai.example.com/v1/chat/completions \
   -H "Authorization: Bearer your-proxy-key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
+  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
 ---
@@ -131,7 +131,7 @@ curl https://ai.example.com/v1/chat/completions \
 | **算力核时** | **1,600 核时**（dev + CI 共享池） | `runner.cpus: 2` 反代工作区整月 30 天 7×24h 不间断运行仅消耗 **1,440 核时**（完全在免费池内），无需关机省核时。 |
 
 > 💡 **2 亿 Tokens/月的实测换算逻辑**：
-> 1. **官方基础定价**：对 `deepseek-v4-flash` 实测，全新未命中缓存的请求约 9,000 tokens 花费 0.39 credit（约 **2.3 万 tokens / credit**）。
+> 1. **官方基础定价**：对 `deepseek-v4.1-flash` 实测，全新未命中缓存的请求约 9,000 tokens 花费 0.39 credit（约 **2.3 万 tokens / credit**）。
 > 2. **官方 Prompt Cache 30倍优惠**：命中 CNB 的 prompt 缓存后降至 **~0.01 credit**，相当于基准价格的 **1/30**（约 **70 万 tokens / credit**）。
 > 3. **综合场景折算**：在 Cursor、Claude Code、Agent 编码等多轮对话和长 System Prompt 场景下，上下文缓存命中率通常在 80%~95%（取典型 **90% 命中率**）：
 >    $$\text{综合成本} = 10\% \times 1 + 90\% \times \frac{1}{30} \approx 13\% \text{ 原价} \implies \approx 17.7\text{ 万 tokens / credit}$$
@@ -171,7 +171,8 @@ npm run quota                 # 或: npx cnb2api-quota
 | `PROXY_KEY` | — (必填) | 客户端访问反代网关的 Bearer Token / x-api-key。 |
 | `CNB_TOKEN` | — (必填) | CNB 内网端点鉴权令牌，流水线环境自动注入。 |
 | `CNB_REPO_SLUG` | (内置) | 当前仓库 `org/repo`，流水线内置自动填充。 |
-| `PROXY_MODELS` | `deepseek-v4-flash,glm-5.3-flash,kimi-k3` | `/v1/models` 暴露的模型列表。 |
+| `PROXY_MODELS` | `deepseek-v4.1-flash,glm-5.3-flash,kimi-k3` | **兜底**模型列表：仅在尚未嗅探到真实上游模型名时用于 `/v1/models`。 |
+| `PROXY_MODELS_STATE` | `models-state.json` | 嗅探到的模型名注册表的持久化路径，跨工作区重启保留。相对路径相对于运行目录解析。 |
 | `PROXY_PORT` | `9001` | 服务监听端口。 |
 | `PROXY_UPSTREAM_TIMEOUT_MS` | `15000` | 上游连接首字节超时 (ms)。 |
 | `PROXY_IDLE_TIMEOUT_MS` | `300000` | 流式事件空闲超时看门狗 (ms)。 |
@@ -183,7 +184,7 @@ npm run quota                 # 或: npx cnb2api-quota
 ## 常见问题 (FAQ)
 
 **Q: 既然上游是 DeepSeek，为什么模型列表有 glm 和 kimi？**  
-A: CNB 官方网关目前在底层统一将请求路由至 `deepseek-v4-flash`。暴露多个模型 ID 仅为了兼容各类客户端的默认预设，后续上游开放多模型时反代无需修改即可支持。
+A: `/v1/models` 是**自发现**的：CNB 网关没有列表接口，所以反代从每一次补全响应里嗅探网关回带的真实模型 id（例如 `deepseek-v4.1-flash`）并对外暴露，且持久化到磁盘跨重启保留。`PROXY_MODELS` 只是首个请求发生前的**兜底**列表——它保证各类客户端默认预设开箱即用，你也可以随时把它固化成 `/v1/models` 实际返回过的值。
 
 **Q: 原生函数/工具调用（Tool Calls）支持怎么样？**  
 A: 完整原生支持。流式模式下支持 `input_json_delta` 增量合并，非流式模式下忠实聚合出标准的 `tool_calls` 结构。
