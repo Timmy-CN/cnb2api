@@ -166,6 +166,22 @@ test('请求转换：messages 内 system 角色按序透传（真机 claude code
   ]);
 });
 
+test('请求转换：messages 内 system 带块数组 content 保持 system 角色（回归：曾降级为 user）', () => {
+  // 字符串 content 的内联 system 正确透传，但数组 content 走 convertUserBlocks 时
+  // role 被硬编码 user —— 同一条消息两种形态一个保留一个降级。修复后 role 由调用方传入。
+  const out = fromAnthropicRequest({
+    max_tokens: 50,
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 'block-array system' }] },
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+    ],
+  });
+  assert.deepEqual(out.messages, [
+    { role: 'system', content: 'block-array system' },
+    { role: 'user', content: 'hi' },
+  ]);
+});
+
 test('请求转换：非法输入抛 ProtocolError（status 400）', () => {
   assert.throws(() => fromAnthropicRequest({ messages: [] }), ProtocolError);
   assert.throws(() => fromAnthropicRequest({ messages: [{ role: 'tool', content: 'x' }] }), ProtocolError);

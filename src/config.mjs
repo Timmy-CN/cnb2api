@@ -43,3 +43,11 @@ if (!config.upstreamUrl) {
   console.error('[config] upstream URL is empty: set CNB_REPO_SLUG (org/repo) or UPSTREAM_OVERRIDE. Refusing to start.');
   process.exit(1);
 }
+// 数字环境变量塞非法值时 Number() 得 NaN，setTimeout(fn, NaN) 按 0ms 立即触发 →
+// 每条上游流瞬间 abort，全线不可用。fail-fast 在启动时拦下，而不是带病运行。
+for (const [key, env] of [['upstreamTimeoutMs', 'PROXY_UPSTREAM_TIMEOUT_MS'], ['idleTimeoutMs', 'PROXY_IDLE_TIMEOUT_MS']]) {
+  if (!Number.isFinite(config[key]) || config[key] <= 0) {
+    console.error(`[config] ${env} must be a positive number (ms), got "${process.env[env]}". Refusing to start.`);
+    process.exit(1);
+  }
+}

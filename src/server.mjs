@@ -20,19 +20,29 @@ function readBody(req, maxBytes) {
     const chunks = [];
     let size = 0;
     let oversized = false;
+    let settled = false;
+    const settle = (fn, v) => { if (!settled) { settled = true; fn(v); } };
     req.on('data', (c) => {
       if (oversized) return; // 超限后继续丢弃到达的数据，让 413 响应能干净送达
       size += c.length;
       if (size > maxBytes) {
         oversized = true;
         chunks.length = 0;
-        reject(Object.assign(new Error('body too large'), { code: 413 }));
+        settle(reject, Object.assign(new Error('body too large'), { code: 413 }));
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => { if (!oversized) resolve(Buffer.concat(chunks).toString('utf8')); });
-    req.on('error', () => {}); // reject 已发生/客户端断开，静默即可
+    req.on('end', () => { if (!oversized) { settle(resolve, Buffer.concat(chunks).toString('utf8')); } });
+    // 客户端 body 未读完就断开（ECONNRESET/半途 FIN）：必须 settle 挂起的 Promise，
+    // 否则 await readJsonBody 的 handler 永久悬挂（闭包泄漏 + finally 访问日志永不落）。
+    // req.complete 保证正常读完后的 close 不误伤。
+    const onGone = () => {
+      if (settled || oversized || req.complete) return;
+      settle(reject, Object.assign(new Error('client aborted mid-body'), { code: 'CLIENT_ABORTED' }));
+    };
+    req.on('error', onGone);
+    req.on('close', onGone);
   });
 }
 
@@ -60,7 +70,7 @@ async function readJsonBody(req, res, reqId, { envelope = false } = {}) {
     raw = await readBody(req, config.maxBodyBytes);
   } catch (e) {
     if (e.code === 413) send(res, 413, envelope ? anthropicError(413, { error: { message: 'request body exceeds limit' } }) : { error: { message: 'request body exceeds limit', type: 'invalid_request_error' } });
-    else throw e;
+    else if (e.code !== 'CLIENT_ABORTED') throw e; // 客户端断开无响应可写，静默终结
     return null;
   }
   let parsed;
@@ -124,7 +134,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url.split('?')[0].endsWith('/chat/completions')) {
-      return handleChatCompletions(req, res, reqId);
+      // 必须 await：裸 return 让外层 try/catch 捕不到 handler 内的异常
+      //（async 函数异常变 unhandledRejection），finally 也会提前执行、ms 记成假数据
+      await handleChatCompletions(req, res, reqId);
+      return;
     }
 
     // Anthropic Messages 协议（claude code 直连）：翻译成上游 OpenAI 端点
